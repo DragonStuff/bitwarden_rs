@@ -33,6 +33,7 @@ macro_rules! make_error {
     };
 }
 
+use rocket::error::Error as RocketErr;
 use diesel::result::Error as DieselErr;
 use diesel::ConnectionError as DieselConErr;
 use diesel_migrations::RunMigrationsError as DieselMigErr;
@@ -47,6 +48,7 @@ use std::io::Error as IOErr;
 use std::time::SystemTimeError as TimeErr;
 use u2f::u2ferror::U2fError as U2fErr;
 use yubico::yubicoerror::YubicoError as YubiErr;
+use openssl::error::ErrorStack as OpSSLErr;
 
 use lettre::address::AddressError as AddrErr;
 use lettre::error::Error as LettreErr;
@@ -68,6 +70,7 @@ make_error! {
     SimpleError(String):  _no_source,  _api_error,
     // Used for special return values, like 2FA errors
     JsonError(Value):     _no_source,  _serialize,
+    RocketError(RocketErr):_has_source, _api_error,
     DbError(DieselErr):   _has_source, _api_error,
     R2d2Error(R2d2Err):   _has_source, _api_error,
     U2fError(U2fErr):     _has_source, _api_error,
@@ -85,6 +88,7 @@ make_error! {
     AddressError(AddrErr):    _has_source, _api_error,
     SmtpError(SmtpErr):       _has_source, _api_error,
     FromStrError(FromStrErr): _has_source, _api_error,
+    OpSSLError(OpSSLErr):     _has_source, _api_error,
 
     DieselConError(DieselConErr): _has_source, _api_error,
     DieselMigError(DieselMigErr): _has_source, _api_error,
@@ -187,8 +191,8 @@ use rocket::http::{ContentType, Status};
 use rocket::request::Request;
 use rocket::response::{self, Responder, Response};
 
-impl<'r> Responder<'r> for Error {
-    fn respond_to(self, _: &Request) -> response::Result<'r> {
+impl<'r> Responder<'r, 'static> for Error {
+    fn respond_to(self, _: &Request) -> response::Result<'static> {
         match self.error {
             ErrorKind::EmptyError(_) => {} // Don't print the error in this situation
             ErrorKind::SimpleError(_) => {} // Don't print the error in this situation
@@ -196,11 +200,12 @@ impl<'r> Responder<'r> for Error {
         };
 
         let code = Status::from_code(self.error_code).unwrap_or(Status::BadRequest);
+        let body = self.to_string();
 
         Response::build()
             .status(code)
             .header(ContentType::JSON)
-            .sized_body(Cursor::new(format!("{}", self)))
+            .sized_body(Some(body.len()), Cursor::new(body))
             .ok()
     }
 }
@@ -229,18 +234,6 @@ macro_rules! err_code {
     ($usr_msg:expr, $log_value:expr, $err_code: literal) => {{
         error!("{}. {}", $usr_msg, $log_value);
         return Err(crate::error::Error::new($usr_msg, $log_value).with_code($err_code));
-    }};
-}
-
-#[macro_export]
-macro_rules! err_discard {
-    ($msg:expr, $data:expr) => {{
-        std::io::copy(&mut $data.open(), &mut std::io::sink()).ok();
-        return Err(crate::error::Error::new($msg, $msg));
-    }};
-    ($usr_msg:expr, $log_value:expr, $data:expr) => {{
-        std::io::copy(&mut $data.open(), &mut std::io::sink()).ok();
-        return Err(crate::error::Error::new($usr_msg, $log_value));
     }};
 }
 

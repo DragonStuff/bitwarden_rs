@@ -1,8 +1,10 @@
-use std::{io::Read, path::Path};
+use std::path::Path;
 
 use chrono::{DateTime, Duration, Utc};
-use multipart::server::{save::SavedData, Multipart, SaveResult};
-use rocket::{http::ContentType, Data};
+use rocket::{
+    data::TempFile,
+    form::{Form, FromForm},
+};
 use rocket_contrib::json::Json;
 use serde_json::Value;
 
@@ -126,24 +128,27 @@ fn post_send(data: JsonUpcase<SendData>, headers: Headers, conn: DbConn, nt: Not
     Ok(Json(send.to_json()))
 }
 
+#[derive(FromForm)]
+struct UploadData<'f> {
+    model: JsonUpcase<SendData>,
+    data: TempFile<'f>,
+}
+
 #[post("/sends/file", format = "multipart/form-data", data = "<data>")]
-fn post_send_file(data: Data, content_type: &ContentType, headers: Headers, conn: DbConn, nt: Notify) -> JsonResult {
+async fn post_send_file(data: Form<UploadData<'_>>, headers: Headers, conn: DbConn, nt: Notify<'_>) -> JsonResult {
     enforce_disable_send_policy(&headers, &conn)?;
 
-    let boundary = content_type.params().next().expect("No boundary provided").1;
+    let mut data = data.into_inner();
 
-    let mut mpart = Multipart::with_body(data.open(), boundary);
+    // Create the Send
+    let mut send = create_send(data.model.into_inner().data, headers.user.uuid.clone())?;
+    let file_id: String = data_encoding::HEXLOWER.encode(&crate::crypto::get_random(vec![0; 32]));
 
-    // First entry is the SendData JSON
-    let mut model_entry = match mpart.read_entry()? {
-        Some(e) if &*e.headers.name == "model" => e,
-        Some(_) => err!("Invalid entry name"),
-        None => err!("No model entry present"),
-    };
+    if send.atype != SendType::File as i32 {
+        err!("Send content is not a file");
+    }
 
-    let mut buf = String::new();
-    model_entry.data.read_to_string(&mut buf)?;
-    let data = serde_json::from_str::<crate::util::UpCase<SendData>>(&buf)?;
+    let file_path = Path::new(&CONFIG.sends_folder()).join(&send.uuid).join(&file_id);
 
     // Get the file length and add an extra 10% to avoid issues
     const SIZE_110_MB: u64 = 115_343_360;
@@ -160,44 +165,17 @@ fn post_send_file(data: Data, content_type: &ContentType, headers: Headers, conn
         None => SIZE_110_MB,
     };
 
-    // Create the Send
-    let mut send = create_send(data.data, headers.user.uuid.clone())?;
-    let file_id: String = data_encoding::HEXLOWER.encode(&crate::crypto::get_random(vec![0; 32]));
-
-    if send.atype != SendType::File as i32 {
-        err!("Send content is not a file");
+    // Check the size limits
+    let size = data.data.len();
+    if size > size_limit {
+        err!(format!(
+            "Send size limit exceeded. Free: {}, used: {}",
+            size_limit, size
+        ))
     }
 
-    let file_path = Path::new(&CONFIG.sends_folder()).join(&send.uuid).join(&file_id);
-
-    // Read the data entry and save the file
-    let mut data_entry = match mpart.read_entry()? {
-        Some(e) if &*e.headers.name == "data" => e,
-        Some(_) => err!("Invalid entry name"),
-        None => err!("No model entry present"),
-    };
-
-    let size = match data_entry
-        .data
-        .save()
-        .memory_threshold(0)
-        .size_limit(size_limit)
-        .with_path(&file_path)
-    {
-        SaveResult::Full(SavedData::File(_, size)) => size as i32,
-        SaveResult::Full(other) => {
-            std::fs::remove_file(&file_path).ok();
-            err!(format!("Attachment is not a file: {:?}", other));
-        }
-        SaveResult::Partial(_, reason) => {
-            std::fs::remove_file(&file_path).ok();
-            err!(format!("Attachment size limit exceeded with this file: {:?}", reason));
-        }
-        SaveResult::Error(e) => {
-            std::fs::remove_file(&file_path).ok();
-            err!(format!("Error: {:?}", e));
-        }
-    };
+    tokio::fs::create_dir_all(file_path.parent().expect("Path has no parent")).await?;
+    data.data.persist_to(file_path).await?;
 
     // Set ID and sizes
     let mut data_value: Value = serde_json::from_str(&send.data)?;
@@ -206,7 +184,7 @@ fn post_send_file(data: Data, content_type: &ContentType, headers: Headers, conn
         o.insert(String::from("Size"), Value::Number(size.into()));
         o.insert(
             String::from("SizeName"),
-            Value::String(crate::util::get_display_size(size)),
+            Value::String(crate::util::get_display_size(size as i32)),
         );
     }
     send.data = serde_json::to_string(&data_value)?;

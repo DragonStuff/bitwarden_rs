@@ -3,10 +3,11 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 use std::{env, process::Command, time::Duration};
 
-use reqwest::{blocking::Client, header::USER_AGENT};
+use reqwest::{Client, header::USER_AGENT};
 use rocket::{
-    http::{Cookie, Cookies, SameSite},
-    request::{self, FlashMessage, Form, FromRequest, Outcome, Request},
+    http::{Cookie, CookieJar, SameSite},
+    form::Form,
+    request::{self, FlashMessage, FromRequest, Outcome, Request},
     response::{content::Html, Flash, Redirect},
     Route,
 };
@@ -88,10 +89,11 @@ fn admin_path() -> String {
 
 struct Referer(Option<String>);
 
-impl<'a, 'r> FromRequest<'a, 'r> for Referer {
+#[rocket::async_trait]
+impl<'r> FromRequest<'r> for Referer {
     type Error = ();
 
-    fn from_request(request: &'a Request<'r>) -> request::Outcome<Self, Self::Error> {
+    async fn from_request(request: &'r Request<'_>) -> request::Outcome<Self, Self::Error> {
         Outcome::Success(Referer(request.headers().get_one("Referer").map(str::to_string)))
     }
 }
@@ -136,7 +138,7 @@ struct LoginForm {
 #[post("/", data = "<data>")]
 fn post_admin_login(
     data: Form<LoginForm>,
-    mut cookies: Cookies,
+    cookies: &CookieJar,
     ip: ClientIp,
     referer: Referer,
 ) -> Result<Redirect, Flash<Redirect>> {
@@ -291,7 +293,7 @@ fn test_smtp(data: Json<InviteData>, _token: AdminToken) -> EmptyResult {
 }
 
 #[get("/logout")]
-fn logout(mut cookies: Cookies, referer: Referer) -> Result<Redirect, ()> {
+fn logout(cookies: &CookieJar, referer: Referer) -> Result<Redirect, ()> {
     cookies.remove(Cookie::named(COOKIE_NAME));
     Ok(Redirect::to(admin_url(referer)))
 }
@@ -448,26 +450,26 @@ struct GitCommit {
     sha: String,
 }
 
-fn get_github_api<T: DeserializeOwned>(url: &str) -> Result<T, Error> {
+async fn get_github_api<T: DeserializeOwned>(url: &str) -> Result<T, Error> {
     let github_api = Client::builder().build()?;
 
     Ok(github_api
         .get(url)
         .timeout(Duration::from_secs(10))
         .header(USER_AGENT, "Bitwarden_RS")
-        .send()?
+        .send().await?
         .error_for_status()?
-        .json::<T>()?)
+        .json::<T>().await?)
 }
 
-fn has_http_access() -> bool {
+async fn has_http_access() -> bool {
     let http_access = Client::builder().build().unwrap();
 
     match http_access
         .head("https://github.com/dani-garcia/bitwarden_rs")
         .timeout(Duration::from_secs(10))
         .header(USER_AGENT, "Bitwarden_RS")
-        .send()
+        .send().await
     {
         Ok(r) => r.status().is_success(),
         _ => false,
@@ -475,7 +477,7 @@ fn has_http_access() -> bool {
 }
 
 #[get("/diagnostics")]
-fn diagnostics(_token: AdminToken, _conn: DbConn) -> ApiResult<Html<String>> {
+async fn diagnostics(_token: AdminToken, _conn: DbConn) -> ApiResult<Html<String>> {
     use crate::util::read_file_string;
     use chrono::prelude::*;
     use std::net::ToSocketAddrs;
@@ -487,7 +489,7 @@ fn diagnostics(_token: AdminToken, _conn: DbConn) -> ApiResult<Html<String>> {
 
     // Execute some environment checks
     let running_within_docker = is_running_in_docker();
-    let has_http_access = has_http_access();
+    let has_http_access = has_http_access().await;
     let uses_proxy = env::var_os("HTTP_PROXY").is_some()
         || env::var_os("http_proxy").is_some()
         || env::var_os("HTTPS_PROXY").is_some()
@@ -503,11 +505,11 @@ fn diagnostics(_token: AdminToken, _conn: DbConn) -> ApiResult<Html<String>> {
     // TODO: Maybe we need to cache this using a LazyStatic or something. Github only allows 60 requests per hour, and we use 3 here already.
     let (latest_release, latest_commit, latest_web_build) = if has_http_access {
         (
-            match get_github_api::<GitRelease>("https://api.github.com/repos/dani-garcia/bitwarden_rs/releases/latest") {
+            match get_github_api::<GitRelease>("https://api.github.com/repos/dani-garcia/bitwarden_rs/releases/latest").await {
                 Ok(r) => r.tag_name,
                 _ => "-".to_string(),
             },
-            match get_github_api::<GitCommit>("https://api.github.com/repos/dani-garcia/bitwarden_rs/commits/master") {
+            match get_github_api::<GitCommit>("https://api.github.com/repos/dani-garcia/bitwarden_rs/commits/master").await {
                 Ok(mut c) => {
                     c.sha.truncate(8);
                     c.sha
@@ -519,7 +521,7 @@ fn diagnostics(_token: AdminToken, _conn: DbConn) -> ApiResult<Html<String>> {
             if running_within_docker {
                 "-".to_string()
             } else {
-                match get_github_api::<GitRelease>("https://api.github.com/repos/dani-garcia/bw_web_builds/releases/latest") {
+                match get_github_api::<GitRelease>("https://api.github.com/repos/dani-garcia/bw_web_builds/releases/latest").await {
                     Ok(r) => r.tag_name.trim_start_matches('v').to_string(),
                     _ => "-".to_string(),
                 }
@@ -575,21 +577,22 @@ fn backup_db(_token: AdminToken) -> EmptyResult {
 
 pub struct AdminToken {}
 
-impl<'a, 'r> FromRequest<'a, 'r> for AdminToken {
+#[rocket::async_trait]
+impl<'r> FromRequest<'r> for AdminToken {
     type Error = &'static str;
 
-    fn from_request(request: &'a Request<'r>) -> request::Outcome<Self, Self::Error> {
+    async fn from_request(request: &'r Request<'_>) -> request::Outcome<Self, Self::Error> {
         if CONFIG.disable_admin_token() {
             Outcome::Success(AdminToken {})
         } else {
-            let mut cookies = request.cookies();
+            let cookies = request.cookies();
 
             let access_token = match cookies.get(COOKIE_NAME) {
                 Some(cookie) => cookie.value(),
                 None => return Outcome::Forward(()), // If there is no cookie, redirect to login
             };
 
-            let ip = match request.guard::<ClientIp>() {
+            let ip = match ClientIp::from_request(&request).await {
                 Outcome::Success(ip) => ip.ip,
                 _ => err_handler!("Error getting Client IP"),
             };

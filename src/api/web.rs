@@ -17,8 +17,8 @@ pub fn routes() -> Vec<Route> {
 }
 
 #[get("/")]
-fn web_index() -> Cached<Option<NamedFile>> {
-    Cached::short(NamedFile::open(Path::new(&CONFIG.web_vault_folder()).join("index.html")).ok())
+async fn web_index() -> Cached<Option<NamedFile>> {
+    Cached::short(NamedFile::open(Path::new(&CONFIG.web_vault_folder()).join("index.html")).await.ok())
 }
 
 #[get("/app-id.json")]
@@ -51,18 +51,18 @@ fn app_id() -> Cached<Content<Json<Value>>> {
 }
 
 #[get("/<p..>", rank = 10)] // Only match this if the other routes don't match
-fn web_files(p: PathBuf) -> Cached<Option<NamedFile>> {
-    Cached::long(NamedFile::open(Path::new(&CONFIG.web_vault_folder()).join(p)).ok())
+async fn web_files(p: PathBuf) -> Cached<Option<NamedFile>> {
+    Cached::long(NamedFile::open(Path::new(&CONFIG.web_vault_folder()).join(p)).await.ok())
 }
 
 #[get("/attachments/<uuid>/<file..>")]
-fn attachments(uuid: String, file: PathBuf) -> Option<NamedFile> {
-    NamedFile::open(Path::new(&CONFIG.attachments_folder()).join(uuid).join(file)).ok()
+async fn attachments(uuid: String, file: PathBuf) -> Option<NamedFile> {
+    NamedFile::open(Path::new(&CONFIG.attachments_folder()).join(uuid).join(file)).await.ok()
 }
 
 #[get("/sends/<send_id>/<file_id>")]
-fn sends(send_id: String, file_id: String) -> Option<NamedFile> {
-    NamedFile::open(Path::new(&CONFIG.sends_folder()).join(send_id).join(file_id)).ok()
+async fn sends(send_id: String, file_id: String) -> Option<NamedFile> {
+    NamedFile::open(Path::new(&CONFIG.sends_folder()).join(send_id).join(file_id)).await.ok()
 }
 
 #[get("/alive")]

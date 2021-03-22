@@ -20,7 +20,7 @@ use std::{
     fs::create_dir_all,
     panic,
     path::Path,
-    process::{exit, Command},
+    process::exit,
     str::FromStr,
     thread,
 };
@@ -38,9 +38,10 @@ mod util;
 
 pub use config::CONFIG;
 pub use error::{Error, MapResult};
+use rocket::data::{Limits, ToByteUnit};
 pub use util::is_running_in_docker;
 
-fn main() {
+async fn async_main() -> Result<(), Error> {
     parse_args();
     launch_info();
 
@@ -54,12 +55,15 @@ fn main() {
     };
 
     check_data_folder();
-    check_rsa_keys();
+    check_rsa_keys().unwrap_or_else(|_| {
+        error!("Error creating keys, exiting...");
+        exit(1);
+    });
     check_web_vault();
 
     create_icon_cache_folder();
 
-    launch_rocket(extra_debug);
+    launch_rocket(extra_debug).await
 }
 
 const HELP: &str = "\
@@ -114,10 +118,11 @@ fn init_logging(level: log::LevelFilter) -> Result<(), fern::InitError> {
         .level_for("hyper::server", log::LevelFilter::Warn)
         // Silence rocket logs
         .level_for("_", log::LevelFilter::Off)
-        .level_for("launch", log::LevelFilter::Off)
-        .level_for("launch_", log::LevelFilter::Off)
-        .level_for("rocket::rocket", log::LevelFilter::Off)
-        .level_for("rocket::fairing", log::LevelFilter::Off)
+        .level_for("launch", log::LevelFilter::Warn)
+        .level_for("launch_", log::LevelFilter::Warn)
+        .level_for("rocket::rocket", log::LevelFilter::Warn)
+        .level_for("rocket::server", log::LevelFilter::Warn)
+        .level_for("rocket::fairing::fairings", log::LevelFilter::Warn)
         // Never show html5ever and hyper::proto logs, too noisy
         .level_for("html5ever", log::LevelFilter::Off)
         .level_for("hyper::proto", log::LevelFilter::Off)
@@ -241,52 +246,29 @@ fn check_data_folder() {
     }
 }
 
-fn check_rsa_keys() {
+fn check_rsa_keys() -> Result<(), crate::error::Error> {
     // If the RSA keys don't exist, try to create them
-    if !util::file_exists(&CONFIG.private_rsa_key()) || !util::file_exists(&CONFIG.public_rsa_key()) {
-        info!("JWT keys don't exist, checking if OpenSSL is available...");
+    let priv_path = CONFIG.private_rsa_key();
+    let pub_path = CONFIG.public_rsa_key();
 
-        Command::new("openssl").arg("version").status().unwrap_or_else(|_| {
-            info!(
-                "Can't create keys because OpenSSL is not available, make sure it's installed and available on the PATH"
-            );
-            exit(1);
-        });
+    if !util::file_exists(&priv_path) {
+        let rsa_key = openssl::rsa::Rsa::generate(2048)?;
 
-        info!("OpenSSL detected, creating keys...");
-
-        let key = CONFIG.rsa_key_filename();
-
-        let pem = format!("{}.pem", key);
-        let priv_der = format!("{}.der", key);
-        let pub_der = format!("{}.pub.der", key);
-
-        let mut success = Command::new("openssl")
-            .args(&["genrsa", "-out", &pem])
-            .status()
-            .expect("Failed to create private pem file")
-            .success();
-
-        success &= Command::new("openssl")
-            .args(&["rsa", "-in", &pem, "-outform", "DER", "-out", &priv_der])
-            .status()
-            .expect("Failed to create private der file")
-            .success();
-
-        success &= Command::new("openssl")
-            .args(&["rsa", "-in", &priv_der, "-inform", "DER"])
-            .args(&["-RSAPublicKey_out", "-outform", "DER", "-out", &pub_der])
-            .status()
-            .expect("Failed to create public der file")
-            .success();
-
-        if success {
-            info!("Keys created correctly.");
-        } else {
-            error!("Error creating keys, exiting...");
-            exit(1);
-        }
+        let priv_key = rsa_key.private_key_to_pem()?;
+        crate::util::write_file(&priv_path, &priv_key)?;
+        info!("Private key created correctly.");
     }
+
+    if !util::file_exists(&pub_path) {
+        let rsa_key = openssl::rsa::Rsa::private_key_from_pem(&util::read_file(&priv_path)?)?;
+
+        let pub_key = rsa_key.public_key_to_pem()?;
+        crate::util::write_file(&pub_path, &pub_key)?;
+        info!("Public key created correctly.");
+    }
+
+    auth::load_keys();
+    Ok(())
 }
 
 fn check_web_vault() {
@@ -304,7 +286,7 @@ fn check_web_vault() {
     }
 }
 
-fn launch_rocket(extra_debug: bool) {
+async fn launch_rocket(extra_debug: bool) -> Result<(), Error> {
     let pool = match util::retry_db(db::DbPool::from_config, CONFIG.db_connection_retries()) {
         Ok(p) => p,
         Err(e) => {
@@ -317,9 +299,17 @@ fn launch_rocket(extra_debug: bool) {
 
     let basepath = &CONFIG.domain_path();
 
+    let mut config = rocket::Config::from(rocket::Config::figment());
+    config.address = std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED);
+
+    config.limits = Limits::new()
+        .limit("json", 10.megabytes())
+        .limit("data-form", 150.megabytes())
+        .limit("file", 150.megabytes());
+
     // If adding more paths here, consider also adding them to
     // crate::utils::LOGGED_ROUTES to make sure they appear in the log
-    let result = rocket::ignite()
+    let instance = rocket::custom(config)
         .mount(&[basepath, "/"].concat(), api::web_routes())
         .mount(&[basepath, "/api"].concat(), api::core_routes())
         .mount(&[basepath, "/admin"].concat(), api::admin_routes())
@@ -330,10 +320,24 @@ fn launch_rocket(extra_debug: bool) {
         .manage(api::start_notification_server())
         .attach(util::AppHeaders())
         .attach(util::CORS())
-        .attach(util::BetterLogging(extra_debug))
-        .launch();
+        .attach(util::BetterLogging(extra_debug));
 
-    // Launch and print error if there is one
-    // The launch will restore the original logging level
-    error!("Launch error {:#?}", result);
+    CONFIG.set_rocket_shutdown_handle(instance.shutdown());
+    ctrlc::set_handler(move || {
+        info!("Exiting bitwarden_rs!");
+        CONFIG.shutdown();
+    })
+    .expect("Error setting Ctrl-C handler");
+    
+    instance.launch().await?;
+    
+    info!("Bitwarden_rs process exited!");
+    Ok(())
+}
+
+fn main() -> Result<(), Error> {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(async_main())
 }

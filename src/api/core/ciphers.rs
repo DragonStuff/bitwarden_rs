@@ -2,12 +2,15 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use chrono::{NaiveDateTime, Utc};
-use rocket::{http::ContentType, request::Form, Data, Route};
+use rocket::{
+    data::TempFile,
+    form::{Form, FromForm},
+    Route,
+};
 use rocket_contrib::json::Json;
 use serde_json::Value;
 
 use data_encoding::HEXLOWER;
-use multipart::server::{save::SavedData, Multipart, SaveResult};
 
 use crate::{
     api::{self, EmptyResult, JsonResult, JsonUpcase, Notify, PasswordData, UpdateType},
@@ -79,12 +82,12 @@ pub fn routes() -> Vec<Route> {
 
 #[derive(FromForm, Default)]
 struct SyncData {
-    #[form(field = "excludeDomains")]
+    #[field(name = "excludeDomains")]
     exclude_domains: bool, // Default: 'false'
 }
 
 #[get("/sync?<data..>")]
-fn sync(data: Form<SyncData>, headers: Headers, conn: DbConn) -> JsonResult {
+fn sync(data: SyncData, headers: Headers, conn: DbConn) -> JsonResult {
     let user_json = headers.user.to_json(&conn);
 
     let folders = Folder::find_by_user(&headers.user.uuid, &conn);
@@ -760,35 +763,43 @@ fn share_cipher_by_uuid(
     Ok(Json(cipher.to_json(&headers.host, &headers.user.uuid, &conn)))
 }
 
+#[derive(FromForm)]
+struct UploadData<'f> {
+    key: String,
+    data: TempFile<'f>,
+}
+
 #[post("/ciphers/<uuid>/attachment", format = "multipart/form-data", data = "<data>")]
-fn post_attachment(
+async fn post_attachment(
     uuid: String,
-    data: Data,
-    content_type: &ContentType,
+    data: Form<UploadData<'_>>,
     headers: Headers,
     conn: DbConn,
-    nt: Notify,
+    nt: Notify<'_>,
 ) -> JsonResult {
+    let mut data = data.into_inner();
+
+    let file_name = match data.data.unsanitized_file_name() {
+        Some(file_name) => file_name.to_owned(),
+        None => err!("File name not provided"),
+    };
+
     let cipher = match Cipher::find_by_uuid(&uuid, &conn) {
         Some(cipher) => cipher,
-        None => err_discard!("Cipher doesn't exist", data),
+        None => err!("Cipher doesn't exist"),
     };
 
     if !cipher.is_write_accessible_to_user(&headers.user.uuid, &conn) {
-        err_discard!("Cipher is not write accessible", data)
+        err!("Cipher is not write accessible")
     }
-
-    let mut params = content_type.params();
-    let boundary_pair = params.next().expect("No boundary provided");
-    let boundary = boundary_pair.1;
 
     let size_limit = if let Some(ref user_uuid) = cipher.user_uuid {
         match CONFIG.user_attachment_limit() {
-            Some(0) => err_discard!("Attachments are disabled", data),
+            Some(0) => err!("Attachments are disabled"),
             Some(limit_kb) => {
                 let left = (limit_kb * 1024) - Attachment::size_by_user(user_uuid, &conn);
                 if left <= 0 {
-                    err_discard!("Attachment size limit reached! Delete some files to open space", data)
+                    err!("Attachment size limit reached! Delete some files to open space")
                 }
                 Some(left as u64)
             }
@@ -796,103 +807,75 @@ fn post_attachment(
         }
     } else if let Some(ref org_uuid) = cipher.organization_uuid {
         match CONFIG.org_attachment_limit() {
-            Some(0) => err_discard!("Attachments are disabled", data),
+            Some(0) => err!("Attachments are disabled"),
             Some(limit_kb) => {
                 let left = (limit_kb * 1024) - Attachment::size_by_org(org_uuid, &conn);
                 if left <= 0 {
-                    err_discard!("Attachment size limit reached! Delete some files to open space", data)
+                    err!("Attachment size limit reached! Delete some files to open space")
                 }
                 Some(left as u64)
             }
             None => None,
         }
     } else {
-        err_discard!("Cipher is neither owned by a user nor an organization", data);
+        err!("Cipher is neither owned by a user nor an organization");
     };
 
-    let base_path = Path::new(&CONFIG.attachments_folder()).join(&cipher.uuid);
-
-    let mut attachment_key = None;
-    let mut error = None;
-
-    Multipart::with_body(data.open(), boundary)
-        .foreach_entry(|mut field| {
-            match &*field.headers.name {
-                "key" => {
-                    use std::io::Read;
-                    let mut key_buffer = String::new();
-                    if field.data.read_to_string(&mut key_buffer).is_ok() {
-                        attachment_key = Some(key_buffer);
-                    }
-                }
-                "data" => {
-                    // This is provided by the client, don't trust it
-                    let name = field.headers.filename.expect("No filename provided");
-
-                    let file_name = HEXLOWER.encode(&crypto::get_random(vec![0; 10]));
-                    let path = base_path.join(&file_name);
-
-                    let size = match field.data.save().memory_threshold(0).size_limit(size_limit).with_path(path.clone()) {
-                        SaveResult::Full(SavedData::File(_, size)) => size as i32,
-                        SaveResult::Full(other) => {
-                            std::fs::remove_file(path).ok();
-                            error = Some(format!("Attachment is not a file: {:?}", other));
-                            return;
-                        }
-                        SaveResult::Partial(_, reason) => {
-                            std::fs::remove_file(path).ok();
-                            error = Some(format!("Attachment size limit exceeded with this file: {:?}", reason));
-                            return;
-                        }
-                        SaveResult::Error(e) => {
-                            std::fs::remove_file(path).ok();
-                            error = Some(format!("Error: {:?}", e));
-                            return;
-                        }
-                    };
-
-                    let mut attachment = Attachment::new(file_name, cipher.uuid.clone(), name, size);
-                    attachment.akey = attachment_key.clone();
-                    attachment.save(&conn).expect("Error saving attachment");
-                }
-                _ => error!("Invalid multipart name"),
-            }
-        })
-        .expect("Error processing multipart data");
-
-    if let Some(ref e) = error {
-        err!(e);
+    // Check the size limits
+    if let Some(size_limit) = size_limit {
+        if data.data.len() > size_limit {
+            //tokio::fs::remove_file(temp_file).await.ok();
+            err!(format!(
+                "Attachment size limit exceeded. Free: {}, used: {}",
+                size_limit,
+                data.data.len()
+            ))
+        }
     }
 
-    nt.send_cipher_update(UpdateType::CipherUpdate, &cipher, &cipher.update_users_revision(&conn));
+    // Create the folder if it doesn't exist already
+    let base_path = Path::new(&CONFIG.attachments_folder()).join(&cipher.uuid);
+    tokio::fs::create_dir_all(base_path.clone()).await?;
+    let id = HEXLOWER.encode(&crypto::get_random(vec![0; 10]));
+    let target_file = base_path.join(&id);
 
+    tokio::fs::create_dir_all(base_path).await?;
+    data.data.persist_to(target_file).await?;
+
+    let mut attachment = Attachment::new(id, cipher.uuid.clone(), file_name, data.data.len() as i32);
+    attachment.akey = Some(data.key);
+    attachment.save(&conn).expect("Error saving attachment");
+
+    nt.send_cipher_update(UpdateType::CipherUpdate, &cipher, &cipher.update_users_revision(&conn));
     Ok(Json(cipher.to_json(&headers.host, &headers.user.uuid, &conn)))
 }
 
 #[post("/ciphers/<uuid>/attachment-admin", format = "multipart/form-data", data = "<data>")]
-fn post_attachment_admin(
+async fn post_attachment_admin(
     uuid: String,
-    data: Data,
-    content_type: &ContentType,
+    data: Form<UploadData<'_>>,
     headers: Headers,
     conn: DbConn,
-    nt: Notify,
+    nt: Notify<'_>,
 ) -> JsonResult {
-    post_attachment(uuid, data, content_type, headers, conn, nt)
+    post_attachment(uuid, data, headers, conn, nt).await
 }
 
-#[post("/ciphers/<uuid>/attachment/<attachment_id>/share", format = "multipart/form-data", data = "<data>")]
-fn post_attachment_share(
+#[post(
+    "/ciphers/<uuid>/attachment/<attachment_id>/share",
+    format = "multipart/form-data",
+    data = "<data>"
+)]
+async fn post_attachment_share(
     uuid: String,
     attachment_id: String,
-    data: Data,
-    content_type: &ContentType,
+    data: Form<UploadData<'_>>,
     headers: Headers,
     conn: DbConn,
-    nt: Notify,
+    nt: Notify<'_>,
 ) -> JsonResult {
     _delete_cipher_attachment_by_id(&uuid, &attachment_id, &headers, &conn, &nt)?;
-    post_attachment(uuid, data, content_type, headers, conn, nt)
+    post_attachment(uuid, data, headers, conn, nt).await
 }
 
 #[post("/ciphers/<uuid>/attachment/<attachment_id>/delete-admin")]
@@ -1062,13 +1045,13 @@ fn move_cipher_selected_put(
 
 #[derive(FromForm)]
 struct OrganizationId {
-    #[form(field = "organizationId")]
+    #[field(name = "organizationId")]
     org_id: String,
 }
 
 #[post("/ciphers/purge?<organization..>", data = "<data>")]
 fn delete_all(
-    organization: Option<Form<OrganizationId>>,
+    organization: Option<OrganizationId>,
     data: JsonUpcase<PasswordData>,
     headers: Headers,
     conn: DbConn,
