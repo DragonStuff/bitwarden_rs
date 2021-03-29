@@ -51,6 +51,8 @@ macro_rules! generate_connections {
                             let manager = ConnectionManager::new(&url);
                             let pool = Pool::builder()
                                 .max_size(CONFIG.database_max_conns())
+                                .min_idle(Some(0))
+                                .idle_timeout(Some(std::time::Duration::new(1,0)))
                                 .build(manager)
                                 .map_res("Failed to create pool")?;
                             return Ok(Self::$name(pool));
