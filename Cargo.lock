@@ -2740,13 +2740,14 @@ dependencies = [
 [[package]]
 name = "rocket_lamb"
 version = "0.6.0"
-source = "git+https://github.com/dbanty/rocket-lamb?branch=rocket-0.5#9f327b0056021c8fbc666f29761f5f2372ecfc9b"
+source = "git+https://github.com/dbanty/rocket-lamb.git?rev=87c53588f45d4782ca5d180ff0aed14161fe5d21#87c53588f45d4782ca5d180ff0aed14161fe5d21"
 dependencies = [
  "aws_lambda_events",
  "failure",
  "http",
  "lamedh_http",
  "lamedh_runtime",
+ "parking_lot 0.11.1",
  "rocket 0.5.0-dev (git+https://github.com/SergioBenitez/Rocket?branch=master)",
  "tokio",
 ]

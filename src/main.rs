@@ -1,11 +1,12 @@
 #![forbid(unsafe_code)]
+#![feature(proc_macro_hygiene, decl_macro)]
 #![cfg_attr(feature = "unstable", feature(ip))]
+#![feature(proc_macro_hygiene, decl_macro)]
 #![recursion_limit = "512"]
 
 extern crate openssl;
 #[macro_use]
 extern crate rocket;
-use rocket_lamb::RocketExt;
 #[macro_use]
 extern crate serde;
 #[macro_use]
@@ -17,6 +18,7 @@ extern crate diesel;
 #[macro_use]
 extern crate diesel_migrations;
 
+use rocket_lamb::RocketExt;
 use job_scheduler::{JobScheduler, Job};
 use std::{
     fs::create_dir_all,

@@ -30,7 +30,7 @@ syslog = "4.0.1"
 # Web framework for nightly with a focus on ease-of-use, expressibility, and speed.
 rocket = { version = "0.5.0-dev", features = ["tls"], default-features = false }
 rocket_contrib = "0.5.0-dev"
-rocket_lamb = "0.6.0"
+rocket_lamb = { git = "https://github.com/dbanty/rocket-lamb.git", rev = "87c53588f45d4782ca5d180ff0aed14161fe5d21" }
 
 # HTTP client
 reqwest = { version = "0.11.2", features = ["blocking", "json", "gzip", "brotli"] }
