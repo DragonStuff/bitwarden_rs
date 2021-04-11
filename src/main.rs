@@ -5,6 +5,7 @@
 extern crate openssl;
 #[macro_use]
 extern crate rocket;
+use rocket_lamb::RocketExt;
 #[macro_use]
 extern crate serde;
 #[macro_use]
@@ -332,6 +333,7 @@ fn launch_rocket(pool: db::DbPool, extra_debug: bool) {
         .attach(util::AppHeaders())
         .attach(util::Cors())
         .attach(util::BetterLogging(extra_debug))
+        .lambda()
         .launch();
 
     // Launch and print error if there is one
