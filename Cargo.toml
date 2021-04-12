@@ -28,7 +28,7 @@ syslog = "4.0.1"
 
 [dependencies]
 # Web framework for nightly with a focus on ease-of-use, expressibility, and speed.
-rocket = { version = "0.5.0-dev", features = ["tls"], default-features = false }
+rocket = { git = "https://github.com/SergioBenitez/Rocket", branch = "master" }
 rocket_contrib = "0.5.0-dev"
 rocket_lamb = { git = "https://github.com/dbanty/rocket-lamb.git", rev = "87c53588f45d4782ca5d180ff0aed14161fe5d21" }
 
@@ -135,8 +135,8 @@ paste = "1.0.5"
 
 [patch.crates-io]
 # Use newest ring
-rocket = { git = 'https://github.com/SergioBenitez/Rocket', rev = '263e39b5b429de1913ce7e3036575a7b4d88b6d7' }
-rocket_contrib = { git = 'https://github.com/SergioBenitez/Rocket', rev = '263e39b5b429de1913ce7e3036575a7b4d88b6d7' }
+#rocket = { git = 'https://github.com/SergioBenitez/Rocket', rev = '263e39b5b429de1913ce7e3036575a7b4d88b6d7' }
+#rocket_contrib = { git = 'https://github.com/SergioBenitez/Rocket', rev = '263e39b5b429de1913ce7e3036575a7b4d88b6d7' }
 
 # For favicon extraction from main website
 data-url = { git = 'https://github.com/servo/rust-url', package="data-url", rev = '540ede02d0771824c0c80ff9f57fe8eff38b1291' }
