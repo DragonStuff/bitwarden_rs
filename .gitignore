@@ -8,6 +8,8 @@ data
 .vscode
 .idea
 *.iml
+.editorconfig
+src/static/images/fallback-icon.png
 
 # Environment file
 .env
