@@ -33,7 +33,7 @@ rocket_lamb = { git = "https://github.com/dbanty/rocket-lamb", branch = "rocket-
 rocket_contrib = { git = "https://github.com/SergioBenitez/Rocket", branch = "master" , features = ["json"] }
 
 # HTTP client
-reqwest = { version = "0.11.2", features = ["blocking", "json", "gzip", "brotli"] }
+reqwest = { version = "0.11.3", features = ["blocking", "json", "gzip", "brotli", "socks"] }
 
 # multipart/form-data support
 multipart = { version = "0.17.1", features = ["server"], default-features = false }
@@ -103,7 +103,7 @@ num-traits = "0.2.14"
 num-derive = "0.3.3"
 
 # Email libraries
-tracing = { version = "0.1", features = ["log"] } # Needed to have lettre trace logging used when SMTP_DEBUG is enabled.
+tracing = { version = "0.1.25", features = ["log"] } # Needed to have lettre trace logging used when SMTP_DEBUG is enabled.
 lettre = { version = "0.10.0-beta.3", features = ["smtp-transport", "builder", "serde", "native-tls", "hostname", "tracing"], default-features = false }
 newline-converter = "0.2.0"
 
